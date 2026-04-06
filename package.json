@@ -1,0 +1,14 @@
+{
+  "name": "local-agent-brain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.15.0",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "brain": "node ./packages/brain-cli/bin/brain.js",
+    "test": "node --test tests"
+  }
+}

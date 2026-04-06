@@ -1,0 +1,9 @@
+{
+  "name": "@local-agent-brain/brain-cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "brain": "./bin/brain.js"
+  }
+}

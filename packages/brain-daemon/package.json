@@ -1,0 +1,6 @@
+{
+  "name": "@local-agent-brain/brain-daemon",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module"
+}

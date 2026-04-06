@@ -1,0 +1,6 @@
+{
+  "name": "@local-agent-brain/brain-connectors-fs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module"
+}
