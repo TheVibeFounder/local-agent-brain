@@ -1,17 +1,22 @@
 # Quickstart
 
+Stay in the root of the repository and run:
+
 ```bash
-npm run brain -- init ./demo-vault --profile research
-cd demo-vault
-npm --prefix .. run brain -- ingest ../tests/fixtures/meeting-notes.md
-npm --prefix .. run brain -- compile
-npm --prefix .. run brain -- health-check
-npm --prefix .. run brain -- query "What is local-agent-brain?"
+npm run brain -- init ./my-brain --profile research
+npm run brain -- doctor --vault ./my-brain
+npm run brain -- ingest ./tests/fixtures/meeting-notes.md --vault ./my-brain
+npm run brain -- compile --vault ./my-brain
+npm run brain -- health-check --vault ./my-brain
+npm run brain -- query "What is local-agent-brain?" --vault ./my-brain
 ```
 
-Promotion flow:
+To promote a candidate:
+
+1. Open `my-brain/staging/memory/`
+2. Copy the candidate ID from the file name
+3. Run:
 
 ```bash
-npm --prefix .. run brain -- compile
-npm --prefix .. run brain -- promote <candidate-id>
+npm run brain -- promote <candidate-id> --vault ./my-brain
 ```
