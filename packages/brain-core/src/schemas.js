@@ -15,6 +15,35 @@ import { loadConfig } from "./config.js";
 import { parseYaml } from "./yaml.js";
 import { relativePath, walkFiles } from "./utils.js";
 
+function bodyLines(body) {
+  return body.replace(/\r\n/g, "\n").split("\n");
+}
+
+function hasTldr(body) {
+  const lines = bodyLines(body);
+  const headingIndex = lines.findIndex((line) => line.startsWith("# "));
+
+  if (headingIndex === -1) {
+    return false;
+  }
+
+  for (let index = headingIndex + 1; index < lines.length; index += 1) {
+    const trimmed = lines[index].trim();
+
+    if (!trimmed) {
+      continue;
+    }
+
+    return trimmed.startsWith("TLDR: ");
+  }
+
+  return false;
+}
+
+function hasSection(body, heading) {
+  return body.includes(`## ${heading}`);
+}
+
 function pushMissingFields(issues, targetPath, data, fields) {
   for (const field of fields) {
     if (!(field in data)) {
@@ -31,6 +60,51 @@ function validateMarkdownFrontmatter(issues, vaultRoot, filePath, requiredFields
   const relative = relativePath(vaultRoot, filePath);
   const parsed = parseFrontmatter(fs.readFileSync(filePath, "utf8"));
   pushMissingFields(issues, relative, parsed.data, requiredFields);
+  return parsed;
+}
+
+function validateWikiPage(issues, vaultRoot, filePath) {
+  const relative = relativePath(vaultRoot, filePath);
+  const parsed = validateMarkdownFrontmatter(issues, vaultRoot, filePath, [
+    "title",
+    "type",
+    "sources",
+    "created",
+    "updated",
+    "tags"
+  ]);
+
+  if (!Array.isArray(parsed.data.sources)) {
+    issues.push({
+      severity: "error",
+      path: relative,
+      message: "Wiki page sources must be an array."
+    });
+  }
+
+  if (!Array.isArray(parsed.data.tags)) {
+    issues.push({
+      severity: "error",
+      path: relative,
+      message: "Wiki page tags must be an array."
+    });
+  }
+
+  if (!hasTldr(parsed.body)) {
+    issues.push({
+      severity: "error",
+      path: relative,
+      message: "Wiki page must include a TLDR line immediately after the title."
+    });
+  }
+
+  if (!hasSection(parsed.body, "Counter-Arguments and Data Gaps")) {
+    issues.push({
+      severity: "error",
+      path: relative,
+      message: "Wiki page must include a Counter-Arguments and Data Gaps section."
+    });
+  }
 }
 
 function validateStateFile(issues, vaultRoot, filePath) {
@@ -295,6 +369,12 @@ export function collectSchemaIssues(vaultRoot) {
     validateMarkdownFrontmatter(issues, vaultRoot, filePath, ["id", "type", "updated_at"]);
   }
 
+  for (const filePath of walkFiles(path.join(vaultRoot, "wiki"))) {
+    if (filePath.endsWith(".md")) {
+      validateWikiPage(issues, vaultRoot, filePath);
+    }
+  }
+
   for (const filePath of walkFiles(path.join(vaultRoot, "staging"))) {
     if (!filePath.endsWith(".md") && !filePath.endsWith(".json")) {
       continue;
@@ -309,8 +389,46 @@ export function collectSchemaIssues(vaultRoot) {
         "created_at",
         "generated_by",
         "provenance",
-        "confidence"
+        "confidence",
+        "title"
       ]);
+
+      const parsed = parseFrontmatter(fs.readFileSync(filePath, "utf8"));
+
+      if (parsed.data.kind === "wiki-page") {
+        if (!("source_type" in parsed.data)) {
+          issues.push({
+            severity: "error",
+            path: relativePath(vaultRoot, filePath),
+            message: "Wiki staging candidate is missing source_type."
+          });
+        }
+
+        if (!("wiki_type" in parsed.data)) {
+          issues.push({
+            severity: "error",
+            path: relativePath(vaultRoot, filePath),
+            message: "Wiki staging candidate is missing wiki_type."
+          });
+        }
+
+        if (!hasTldr(parsed.body)) {
+          issues.push({
+            severity: "error",
+            path: relativePath(vaultRoot, filePath),
+            message: "Wiki staging candidate must include a TLDR line."
+          });
+        }
+
+        if (!hasSection(parsed.body, "Counter-Arguments and Data Gaps")) {
+          issues.push({
+            severity: "error",
+            path: relativePath(vaultRoot, filePath),
+            message: "Wiki staging candidate must include a Counter-Arguments and Data Gaps section."
+          });
+        }
+      }
+
       continue;
     }
   }

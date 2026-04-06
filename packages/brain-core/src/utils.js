@@ -160,7 +160,7 @@ export function normalizeQueryTokens(question) {
 }
 
 export function scoreConfidence(kinds) {
-  if (kinds.some((kind) => kind === "memory" || kind === "decision")) {
+  if (kinds.some((kind) => kind === "wiki" || kind === "memory" || kind === "decision")) {
     return "high";
   }
 

@@ -15,6 +15,8 @@ export const VALID_CONNECTOR_TYPES = ["snapshot", "evidence_only", "state_only"]
 export const REQUIRED_DIRECTORIES = [
   "sources",
   "guides",
+  "wiki",
+  "wiki/query-results",
   "memory",
   "memory/claims",
   "memory/entities",
@@ -27,6 +29,7 @@ export const REQUIRED_DIRECTORIES = [
   "tools",
   "automations",
   "staging",
+  "staging/wiki",
   "staging/memory",
   "staging/decisions",
   "staging/views",
@@ -51,6 +54,7 @@ export const V1_COMMANDS = [
   "ingest",
   "compile",
   "query",
+  "lint",
   "health-check",
   "promote",
   "decision new"

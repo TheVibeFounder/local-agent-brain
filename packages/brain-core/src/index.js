@@ -5,6 +5,7 @@ export {
   healthCheckCommand,
   ingestCommand,
   initCommand,
+  lintCommand,
   promoteCommand,
   queryCommand
 } from "./commands.js";

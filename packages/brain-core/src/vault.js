@@ -34,7 +34,12 @@ export function initializeVault(targetPath, { profile }) {
 
   fs.writeFileSync(
     path.join(vaultRoot, "views/index.md"),
-    `# Vault Index\n\nProfile: ${preset.label}\n\nRun \`brain compile\` to generate staged candidates and refreshed views.\n`,
+    `# Vault Home\n\nProfile: ${preset.label}\n\nRun \`brain compile\` to generate staged wiki candidates and refreshed views.\n`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(vaultRoot, "views/wiki.md"),
+    "# Wiki Index\n\nNo wiki pages yet.\n",
     "utf8"
   );
 

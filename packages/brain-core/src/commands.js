@@ -10,13 +10,16 @@ import { resolveVaultRoot } from "./paths.js";
 import { collectSchemaIssues } from "./schemas.js";
 import { initializeVault } from "./vault.js";
 import {
+  buildPromotedWikiPage,
+  buildQueryResultPage,
+  buildWikiCandidatePage,
+  collectLintIssues,
+  collectWikiPages
+} from "./wiki.js";
+import {
   datedPathParts,
   ensureDirectory,
-  extractEvidenceLines,
-  extractSummary,
-  extractTitle,
   fileExists,
-  hashText,
   isTextFile,
   isUrl,
   nowIso,
@@ -27,6 +30,126 @@ import {
   walkFiles
 } from "./utils.js";
 
+const SENSITIVE_NAME_PATTERNS = [
+  /^\.env(?:\.|$)/i,
+  /(^|[._-])(password|passcode|bank|banking|routing|account|ssn|social-security|seed|wallet|private-key|secret|credential|token)([._-]|$)/i
+];
+
+const SENSITIVE_EXTENSIONS = new Set([
+  ".env",
+  ".key",
+  ".kdbx",
+  ".p12",
+  ".pem",
+  ".pfx"
+]);
+
+const SENSITIVE_CONTENT_PATTERNS = [
+  {
+    label: "private key material",
+    regex: /-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----/
+  },
+  {
+    label: "environment or API secrets",
+    regex: /(^|\n)\s*(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|GITHUB_TOKEN|DATABASE_URL|SECRET_KEY|SESSION_SECRET|ACCESS_TOKEN)\s*=.+/i
+  },
+  {
+    label: "password or pin entry",
+    regex: /(^|\n)\s*(?:password|passcode|pin)\s*[:=]\s*\S+/i
+  },
+  {
+    label: "bank account details",
+    regex: /(routing number|account number)/i
+  },
+  {
+    label: "social security number pattern",
+    regex: /\b\d{3}-\d{2}-\d{4}\b/
+  },
+  {
+    label: "seed or recovery phrase",
+    regex: /(seed phrase|recovery phrase|mnemonic phrase)/i
+  }
+];
+
+function inspectSensitivePath(filePath) {
+  const basename = path.basename(filePath);
+  const extension = path.extname(basename).toLowerCase();
+
+  if (SENSITIVE_EXTENSIONS.has(extension)) {
+    return `matches sensitive file extension ${extension}`;
+  }
+
+  for (const pattern of SENSITIVE_NAME_PATTERNS) {
+    if (pattern.test(basename)) {
+      return "looks like a secrets or financial file by name";
+    }
+  }
+
+  return null;
+}
+
+function inspectSensitiveText(filePath) {
+  if (!isTextFile(filePath)) {
+    return null;
+  }
+
+  const content = fs.readFileSync(filePath, "utf8").slice(0, 200_000);
+
+  for (const pattern of SENSITIVE_CONTENT_PATTERNS) {
+    if (pattern.regex.test(content)) {
+      return `contains ${pattern.label}`;
+    }
+  }
+
+  return null;
+}
+
+function collectSensitiveFindings(targetPath) {
+  const findings = [];
+  const stat = fs.statSync(targetPath);
+  const pathsToInspect = stat.isDirectory() ? walkFiles(targetPath) : [targetPath];
+
+  for (const filePath of pathsToInspect) {
+    const nameReason = inspectSensitivePath(filePath);
+
+    if (nameReason) {
+      findings.push(`${filePath}: ${nameReason}`);
+      continue;
+    }
+
+    const textReason = inspectSensitiveText(filePath);
+
+    if (textReason) {
+      findings.push(`${filePath}: ${textReason}`);
+    }
+  }
+
+  return findings;
+}
+
+function collectSensitiveUrlFindings(target) {
+  const findings = [];
+
+  if (/[?&](?:token|key|password|secret)=/i.test(target)) {
+    findings.push(`${target}: URL appears to include a credential in the query string`);
+  }
+
+  return findings;
+}
+
+function formatSensitiveError(findings) {
+  const preview = findings.slice(0, 5).map((item) => `- ${item}`).join("\n");
+  const suffix = findings.length > 5 ? `\n- ...and ${findings.length - 5} more` : "";
+
+  return [
+    "Ingest blocked because the input looks sensitive.",
+    "This local brain is not a password manager or a place for bank credentials.",
+    "Use a dedicated password manager for secrets, or rerun with --allow-sensitive only if you intentionally want this copied into a separate local vault.",
+    "",
+    preview + suffix
+  ].join("\n");
+}
+
 function readVaultContext(cwd, explicitVault) {
   const vaultRoot = resolveVaultRoot(cwd, explicitVault);
   const config = loadConfig(vaultRoot);
@@ -34,7 +157,7 @@ function readVaultContext(cwd, explicitVault) {
 }
 
 function createUrlCapture(url) {
-  return `# URL Capture\n\n- url: ${url}\n- captured_at: ${nowIso()}\n- note: V1 stores the URL reference durably without remote fetching.\n`;
+  return `# URL Capture\n\n- url: ${url}\n- captured_at: ${nowIso()}\n- note: This V1 capture stores the URL durably without fetching remote content.\n`;
 }
 
 function gatherCompilableFiles(vaultRoot, scope) {
@@ -54,8 +177,8 @@ function gatherCompilableFiles(vaultRoot, scope) {
   return output;
 }
 
-function findExistingCandidateBySource(vaultRoot, sourcePath) {
-  const stagingRoot = path.join(vaultRoot, "staging");
+function findExistingWikiCandidateBySource(vaultRoot, sourcePath) {
+  const stagingRoot = path.join(vaultRoot, "staging/wiki");
 
   for (const candidatePath of walkFiles(stagingRoot)) {
     if (!candidatePath.endsWith(".md")) {
@@ -65,72 +188,78 @@ function findExistingCandidateBySource(vaultRoot, sourcePath) {
     const parsed = parseFrontmatter(fs.readFileSync(candidatePath, "utf8"));
 
     if (parsed.data.source_path === sourcePath && parsed.data.status === "pending") {
-      return { candidatePath, candidate: parsed };
+      return { candidatePath, data: parsed.data };
     }
   }
 
   return null;
 }
 
-function buildCandidateContent(vaultRoot, sourceFilePath) {
-  const content = fs.readFileSync(sourceFilePath, "utf8");
-  const relativeSourcePath = relativePath(vaultRoot, sourceFilePath);
-  const title = extractTitle(content, path.basename(sourceFilePath));
-  const summary = extractSummary(content);
-  const evidence = extractEvidenceLines(content, 3);
-  const sourceHash = hashText(content);
-  const existing = findExistingCandidateBySource(vaultRoot, relativeSourcePath);
-  const id = existing?.candidate.data.id ?? createUlid();
-  const slug = slugify(title, "candidate");
-  const candidatePath = existing?.candidatePath
-    ?? path.join(vaultRoot, "staging/memory", `${id}-${slug}.md`);
+function findCandidateById(vaultRoot, candidateId) {
+  for (const candidatePath of walkFiles(path.join(vaultRoot, "staging"))) {
+    if (!candidatePath.endsWith(".md")) {
+      continue;
+    }
 
-  const body = [
-    `# ${title}`,
-    "",
-    summary,
-    "",
-    "## Evidence",
-    ...evidence.map((line) => `- ${line}`),
-    "",
-    "## Open Questions",
-    "- What should be promoted from this source?"
-  ].join("\n");
+    const parsed = parseFrontmatter(fs.readFileSync(candidatePath, "utf8"));
 
-  const frontmatter = {
-    id,
-    kind: "synthesis",
-    proposed_target: "memory/syntheses",
-    status: "pending",
-    created_at: existing?.candidate.data.created_at ?? nowIso(),
-    generated_by: "brain compile",
-    provenance: [relativeSourcePath],
-    confidence: evidence.length >= 3 ? "medium" : "low",
-    source_path: relativeSourcePath,
-    source_hash: sourceHash
-  };
+    if (parsed.data.id === candidateId) {
+      return { candidatePath, parsed };
+    }
+  }
 
-  return { candidatePath, id, content: serializeFrontmatter(frontmatter, body) };
+  return null;
 }
 
 function writeViews(vaultRoot) {
-  const sections = {
+  const counts = {
     sources: walkFiles(path.join(vaultRoot, "sources")).length,
+    wiki: walkFiles(path.join(vaultRoot, "wiki")).filter((file) => file.endsWith(".md")).length,
     memory: walkFiles(path.join(vaultRoot, "memory")).filter((file) => file.endsWith(".md")).length,
     decisions: walkFiles(path.join(vaultRoot, "decisions")).filter((file) => file.endsWith(".md")).length,
-    staging: walkFiles(path.join(vaultRoot, "staging")).filter((file) => file.endsWith(".md")).length
+    stagingWiki: walkFiles(path.join(vaultRoot, "staging/wiki")).filter((file) => file.endsWith(".md")).length
   };
+  const wikiPages = collectWikiPages(vaultRoot).slice(0, 20);
 
-  const content = `# Vault Status
+  fs.writeFileSync(
+    path.join(vaultRoot, "views/index.md"),
+    `# Vault Home
 
-- Sources: ${sections.sources}
-- Memory files: ${sections.memory}
-- Decisions: ${sections.decisions}
-- Pending staging files: ${sections.staging}
+- Sources: ${counts.sources}
+- Wiki pages: ${counts.wiki}
+- Memory files: ${counts.memory}
+- Decisions: ${counts.decisions}
+- Pending wiki candidates: ${counts.stagingWiki}
 - Updated at: ${nowIso()}
-`;
+`,
+    "utf8"
+  );
 
-  fs.writeFileSync(path.join(vaultRoot, "views/index.md"), content, "utf8");
+  fs.writeFileSync(
+    path.join(vaultRoot, "views/wiki.md"),
+    [
+      "# Wiki Index",
+      "",
+      ...(wikiPages.length > 0
+        ? wikiPages.map((page) => `- ${page.title} (${page.path})`)
+        : ["- No wiki pages yet. Run `brain compile` and `brain promote` first."])
+    ].join("\n"),
+    "utf8"
+  );
+}
+
+function saveQueryResult({ vaultRoot, question, result, searchResults }) {
+  const page = buildQueryResultPage({
+    vaultRoot,
+    question,
+    answer: result.answer,
+    provenance: result.provenance,
+    confidence: result.confidence,
+    relatedResults: searchResults
+  });
+  ensureDirectory(path.dirname(page.targetPath));
+  fs.writeFileSync(page.targetPath, page.content, "utf8");
+  return relativePath(vaultRoot, page.targetPath);
 }
 
 export function initCommand({ targetPath, profile = "research", cwd = process.cwd() }) {
@@ -155,7 +284,7 @@ export function doctorCommand({ cwd = process.cwd(), vault }) {
   };
 }
 
-export function ingestCommand({ target, cwd = process.cwd(), vault }) {
+export function ingestCommand({ target, allowSensitive = false, cwd = process.cwd(), vault }) {
   if (!target) {
     throw new Error("ingest requires a file, folder, or URL.");
   }
@@ -167,6 +296,12 @@ export function ingestCommand({ target, cwd = process.cwd(), vault }) {
   const written = [];
 
   if (isUrl(target)) {
+    const sensitiveFindings = collectSensitiveUrlFindings(target);
+
+    if (!allowSensitive && sensitiveFindings.length > 0) {
+      throw new Error(formatSensitiveError(sensitiveFindings));
+    }
+
     const filename = `${slugify(target, "capture")}.md`;
     const destination = uniquePath(path.join(baseDir, filename));
     fs.writeFileSync(destination, createUrlCapture(target), "utf8");
@@ -176,6 +311,12 @@ export function ingestCommand({ target, cwd = process.cwd(), vault }) {
 
     if (!fileExists(sourcePath)) {
       throw new Error(`Input not found: ${target}`);
+    }
+
+    const sensitiveFindings = collectSensitiveFindings(sourcePath);
+
+    if (!allowSensitive && sensitiveFindings.length > 0) {
+      throw new Error(formatSensitiveError(sensitiveFindings));
     }
 
     const stat = fs.statSync(sourcePath);
@@ -217,7 +358,13 @@ export function compileCommand({ scope, cwd = process.cwd(), vault }) {
   const candidateIds = [];
 
   for (const sourceFile of sourceFiles) {
-    const candidate = buildCandidateContent(vaultRoot, sourceFile);
+    const relativeSourcePath = relativePath(vaultRoot, sourceFile);
+    const existing = findExistingWikiCandidateBySource(vaultRoot, relativeSourcePath);
+    const candidate = buildWikiCandidatePage({
+      vaultRoot,
+      sourceFilePath: sourceFile,
+      existing
+    });
     const existed = fileExists(candidate.candidatePath);
     fs.writeFileSync(candidate.candidatePath, candidate.content, "utf8");
     candidateIds.push(candidate.id);
@@ -247,24 +394,8 @@ export function compileCommand({ scope, cwd = process.cwd(), vault }) {
     updated,
     indexedDocuments: indexResult.documentCount,
     candidateIds,
-    message: `Compile finished with ${created} new and ${updated} updated candidate(s).`
+    message: `Compile finished with ${created} new and ${updated} updated wiki candidate(s).`
   };
-}
-
-function findCandidateById(vaultRoot, candidateId) {
-  for (const candidatePath of walkFiles(path.join(vaultRoot, "staging"))) {
-    if (!candidatePath.endsWith(".md")) {
-      continue;
-    }
-
-    const parsed = parseFrontmatter(fs.readFileSync(candidatePath, "utf8"));
-
-    if (parsed.data.id === candidateId) {
-      return { candidatePath, parsed };
-    }
-  }
-
-  return null;
 }
 
 export function promoteCommand({ candidateId, cwd = process.cwd(), vault }) {
@@ -280,31 +411,18 @@ export function promoteCommand({ candidateId, cwd = process.cwd(), vault }) {
   }
 
   const { candidatePath, parsed } = located;
-  const title = extractTitle(parsed.body, candidateId);
-  const slug = slugify(title, "synthesis");
-  const targetRelative = `${parsed.data.proposed_target}/${candidateId}-${slug}.md`;
-  const targetPath = path.join(vaultRoot, targetRelative);
-  ensureDirectory(path.dirname(targetPath));
 
-  const frontmatter = {
-    id: candidateId,
-    type: "synthesis",
-    status: "promoted",
-    confidence: parsed.data.confidence,
-    sources: parsed.data.provenance ?? [],
-    updated_at: nowIso()
-  };
+  if (parsed.data.kind !== "wiki-page") {
+    throw new Error("Only wiki-page candidates are promotable in the current workflow.");
+  }
 
-  const body = [
-    `# ${title}`,
-    "",
-    extractSummary(parsed.body, 400),
-    "",
-    "## Open Questions",
-    "- Review and refine this synthesis as new evidence arrives."
-  ].join("\n");
+  const page = buildPromotedWikiPage({
+    vaultRoot,
+    parsedCandidate: parsed
+  });
+  ensureDirectory(path.dirname(page.targetPath));
+  fs.writeFileSync(page.targetPath, page.content, "utf8");
 
-  fs.writeFileSync(targetPath, serializeFrontmatter(frontmatter, body), "utf8");
   const updatedCandidate = {
     ...parsed.data,
     status: "promoted",
@@ -312,27 +430,28 @@ export function promoteCommand({ candidateId, cwd = process.cwd(), vault }) {
   };
   fs.writeFileSync(candidatePath, serializeFrontmatter(updatedCandidate, parsed.body), "utf8");
 
+  writeViews(vaultRoot);
   const indexResult = rebuildIndex(vaultRoot);
   logAction(vaultRoot, {
     actor: "brain",
     command: "promote",
     sources_used: parsed.data.provenance ?? [],
     tool: "brain promote",
-    capabilities: ["staging.read", "memory.write", "logs.append"],
+    capabilities: ["staging.read", "wiki.write", "logs.append"],
     result: "ok",
-    side_effects: [relativePath(vaultRoot, targetPath)]
+    side_effects: [relativePath(vaultRoot, page.targetPath)]
   });
 
   return {
     vaultRoot,
     candidateId,
-    target: targetRelative,
+    target: relativePath(vaultRoot, page.targetPath),
     indexedDocuments: indexResult.documentCount,
-    message: `Promoted ${candidateId} into ${targetRelative}.`
+    message: `Promoted ${candidateId} into ${relativePath(vaultRoot, page.targetPath)}.`
   };
 }
 
-export function queryCommand({ question, cwd = process.cwd(), vault }) {
+export function queryCommand({ question, save = false, cwd = process.cwd(), vault }) {
   if (!question) {
     throw new Error("query requires a question.");
   }
@@ -346,27 +465,80 @@ export function queryCommand({ question, cwd = process.cwd(), vault }) {
       confidence: "low",
       answer: "I could not find grounded evidence for that question in the local vault.",
       provenance: [],
+      savedPath: null,
       message: "No grounded evidence found."
     };
   }
 
-  const snippets = results.slice(0, 3).map((result) => result.snippet.replace(/\[[^\]]+\]/g, (value) => value.slice(1, -1)));
+  const snippets = results
+    .slice(0, 3)
+    .map((result) => result.snippet.replace(/\[[^\]]+\]/g, (value) => value.slice(1, -1)));
   const answer = snippets.join(" ");
   const provenance = results.map((result) => result.path);
   const confidence = scoreConfidence(results.map((result) => result.kind));
+  let savedPath = null;
+
+  if (save) {
+    savedPath = saveQueryResult({
+      vaultRoot,
+      question,
+      result: { answer, provenance, confidence },
+      searchResults: results
+    });
+    writeViews(vaultRoot);
+    rebuildIndex(vaultRoot);
+  }
+
+  logAction(vaultRoot, {
+    actor: "brain",
+    command: save ? "query --save" : "query",
+    sources_used: provenance,
+    tool: "brain query",
+    capabilities: save ? ["wiki.write", "logs.append"] : ["logs.append"],
+    result: "ok",
+    side_effects: savedPath ? [savedPath] : []
+  });
 
   return {
     vaultRoot,
     confidence,
     answer,
     provenance,
-    message: "Grounded answer generated from local index."
+    savedPath,
+    message: savedPath
+      ? `Grounded answer generated and saved to ${savedPath}.`
+      : "Grounded answer generated from local index."
+  };
+}
+
+export function lintCommand({ cwd = process.cwd(), vault }) {
+  const { vaultRoot } = readVaultContext(cwd, vault);
+  const issues = collectLintIssues(vaultRoot);
+
+  logAction(vaultRoot, {
+    actor: "brain",
+    command: "lint",
+    sources_used: [],
+    tool: "brain lint",
+    capabilities: ["logs.append"],
+    result: issues.length > 0 ? "warn" : "ok",
+    side_effects: []
+  });
+
+  return {
+    vaultRoot,
+    status: issues.length > 0 ? "warn" : "ok",
+    issues,
+    message: issues.length > 0 ? `Lint found ${issues.length} issue(s).` : "Lint passed."
   };
 }
 
 export function healthCheckCommand({ cwd = process.cwd(), vault }) {
   const { vaultRoot, config } = readVaultContext(cwd, vault);
-  const issues = collectSchemaIssues(vaultRoot);
+  const issues = [
+    ...collectSchemaIssues(vaultRoot),
+    ...collectLintIssues(vaultRoot)
+  ];
   const indexPath = path.join(vaultRoot, config.index_path);
 
   if (!fileExists(indexPath)) {
@@ -383,7 +555,7 @@ export function healthCheckCommand({ cwd = process.cwd(), vault }) {
     sources_used: [],
     tool: "brain health-check",
     capabilities: ["logs.append"],
-    result: issues.some((issue) => issue.severity === "error") ? "error" : "ok",
+    result: issues.some((issue) => issue.severity === "error") ? "error" : issues.length > 0 ? "warn" : "ok",
     side_effects: []
   });
 
@@ -434,6 +606,7 @@ Pending review.
   );
 
   fs.writeFileSync(filePath, content, "utf8");
+  writeViews(vaultRoot);
   const indexResult = rebuildIndex(vaultRoot);
   logAction(vaultRoot, {
     actor: "brain",

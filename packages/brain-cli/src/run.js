@@ -5,6 +5,7 @@ import {
   healthCheckCommand,
   ingestCommand,
   initCommand,
+  lintCommand,
   promoteCommand,
   queryCommand
 } from "../../brain-core/src/index.js";
@@ -14,14 +15,22 @@ function getFlagValue(args, name) {
   return index === -1 ? undefined : args[index + 1];
 }
 
-function removeFlags(args, names) {
+function hasFlag(args, name) {
+  return args.includes(name);
+}
+
+function removeFlags(args, valueFlags, booleanFlags = []) {
   const output = [];
 
   for (let index = 0; index < args.length; index += 1) {
     const value = args[index];
 
-    if (names.includes(value)) {
+    if (valueFlags.includes(value)) {
       index += 1;
+      continue;
+    }
+
+    if (booleanFlags.includes(value)) {
       continue;
     }
 
@@ -47,7 +56,8 @@ function formatQuery(result) {
     "",
     `Confidence: ${result.confidence}`,
     "Provenance:",
-    ...(result.provenance.length > 0 ? result.provenance.map((item) => `- ${item}`) : ["- none"])
+    ...(result.provenance.length > 0 ? result.provenance.map((item) => `- ${item}`) : ["- none"]),
+    ...(result.savedPath ? ["", `Saved: ${result.savedPath}`] : [])
   ].join("\n");
 }
 
@@ -60,9 +70,10 @@ export async function runCli(argv = process.argv.slice(2), options = {}) {
       stdout: `Usage:
   brain init <path> --profile research|creator|operator
   brain doctor
-  brain ingest <file-or-folder-or-url>
+  brain ingest <file-or-folder-or-url> [--allow-sensitive]
   brain compile [scope]
-  brain query "<question>"
+  brain query "<question>" [--save]
+  brain lint
   brain health-check
   brain promote <candidate-id>
   brain decision new [question]
@@ -72,7 +83,7 @@ export async function runCli(argv = process.argv.slice(2), options = {}) {
 
   const [command, ...rest] = argv;
   const vault = getFlagValue(rest, "--vault");
-  const args = removeFlags(rest, ["--vault", "--profile"]);
+  const args = removeFlags(rest, ["--vault", "--profile"], ["--allow-sensitive", "--save"]);
 
   try {
     switch (command) {
@@ -92,7 +103,12 @@ export async function runCli(argv = process.argv.slice(2), options = {}) {
       }
 
       case "ingest": {
-        const result = ingestCommand({ target: args[0], cwd, vault });
+        const result = ingestCommand({
+          target: args[0],
+          allowSensitive: hasFlag(rest, "--allow-sensitive"),
+          cwd,
+          vault
+        });
         return {
           exitCode: 0,
           stdout: `${result.message}\n${result.written.map((item) => `- ${item}`).join("\n")}`
@@ -105,8 +121,21 @@ export async function runCli(argv = process.argv.slice(2), options = {}) {
       }
 
       case "query": {
-        const result = queryCommand({ question: args.join(" "), cwd, vault });
+        const result = queryCommand({
+          question: args.join(" "),
+          save: hasFlag(rest, "--save"),
+          cwd,
+          vault
+        });
         return { exitCode: 0, stdout: formatQuery(result) };
+      }
+
+      case "lint": {
+        const result = lintCommand({ cwd, vault });
+        return {
+          exitCode: 0,
+          stdout: `${result.message}\n${formatIssues(result)}`
+        };
       }
 
       case "health-check": {

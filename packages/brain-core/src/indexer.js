@@ -41,6 +41,8 @@ function parseDocument(filePath, vaultRoot) {
   const parts = relative.split("/");
   const kind = parts[0] === "memory"
     ? "memory"
+    : parts[0] === "wiki"
+      ? "wiki"
     : parts[0] === "decisions"
       ? "decision"
       : parts[0] === "guides"
@@ -73,7 +75,7 @@ function parseDocument(filePath, vaultRoot) {
 }
 
 function collectDocuments(vaultRoot) {
-  const roots = ["sources", "guides", "memory", "decisions", "state"];
+  const roots = ["sources", "guides", "wiki", "memory", "decisions", "state"];
   const documents = [];
 
   for (const root of roots) {
@@ -160,11 +162,12 @@ export function searchIndex(vaultRoot, question, limit = 5) {
     WHERE documents MATCH ${sqlString(matchExpression)}
     ORDER BY
       CASE kind
-        WHEN 'memory' THEN 0
-        WHEN 'decision' THEN 1
-        WHEN 'guide' THEN 2
-        WHEN 'state' THEN 3
-        ELSE 4
+        WHEN 'wiki' THEN 0
+        WHEN 'memory' THEN 1
+        WHEN 'decision' THEN 2
+        WHEN 'guide' THEN 3
+        WHEN 'state' THEN 4
+        ELSE 5
       END,
       bm25(documents)
     LIMIT ${Number(limit)};
